@@ -1,92 +1,81 @@
 import json
-from pathlib import Path
+import os
+from difflib import SequenceMatcher
 
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
-from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
+KB_FILE = "knowledge_base.json"
+SIMILARITY_THRESHOLD = 0.75
 
-TOKEN = "PASTE_YOUR_BOT_TOKEN_HERE"
-KB_FILE = Path("knowledge_base.json")
-SIMILARITY_THRESHOLD = 0.35
+STOP_WORDS = {
+    "what", "is", "are", "the", "a", "an", "of", "to", "do", "does",
+    "how", "can", "you", "i", "in", "on", "for", "your", "my"
+}
 
-class LearningChatbot:
-    def __init__(self, kb_file=KB_FILE):
-        self.kb_file = kb_file
-        self.knowledge_base = self.load_kb()
-        self.vectorizer = TfidfVectorizer(stop_words="english")
-        self.questions = []
-        self.answers = []
-        self.matrix = None
-        self.rebuild_index()
 
-    def load_kb(self):
-        if self.kb_file.exists():
-            with open(self.kb_file, "r", encoding="utf-8") as f:
-                return json.load(f)
-        return []
+def normalize(text):
+    words = [w for w in text.lower().strip().split() if w not in STOP_WORDS]
+    return " ".join(words) if words else text.lower().strip()
 
-    def save_kb(self):
-        with open(self.kb_file, "w", encoding="utf-8") as f:
-            json.dump(self.knowledge_base, f, indent=2, ensure_ascii=False)
 
-    def rebuild_index(self):
-        self.questions = [item["question"] for item in self.knowledge_base]
-        self.answers = [item["answer"] for item in self.knowledge_base]
-        self.matrix = self.vectorizer.fit_transform(self.questions) if self.questions else None
+def load_knowledge_base(path=KB_FILE):
+    if not os.path.exists(path):
+        return {"qa_pairs": []}
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
 
-    def teach(self, question, answer):
-        self.knowledge_base.append({"question": question.strip(), "answer": answer.strip()})
-        self.save_kb()
-        self.rebuild_index()
-        return "Thanks, I learned that."
 
-    def find_best_answer(self, user_question):
-        if not self.knowledge_base or self.matrix is None:
-            return None, 0.0
+def save_knowledge_base(kb, path=KB_FILE):
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(kb, f, indent=2, ensure_ascii=False)
 
-        query_vec = self.vectorizer.transform([user_question])
-        scores = cosine_similarity(query_vec, self.matrix).flatten()
-        best_index = scores.argmax()
-        return self.answers[best_index], float(scores[best_index])
 
-botbrain = LearningChatbot()
-TEACH_MODE = {}
+def similarity(a, b):
+    return SequenceMatcher(None, normalize(a), normalize(b)).ratio()
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "Hi, I am a learning chatbot.\n"
-        "Ask me anything.\n"
-        "If I do not know, I will ask you to teach me."
-    )
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    text = update.message.text.strip()
+def find_best_match(user_question, kb):
+    best_pair = None
+    best_score = 0.0
 
-    if user_id in TEACH_MODE:
-        original_question = TEACH_MODE.pop(user_id)
-        response = botbrain.teach(original_question, text)
-        await update.message.reply_text(response)
-        return
+    for pair in kb.get("qa_pairs", []):
+        score = similarity(user_question, pair["question"])
+        if score > best_score:
+            best_score = score
+            best_pair = pair
 
-    answer, score = botbrain.find_best_answer(text)
+    return best_pair, best_score
 
-    if answer and score >= SIMILARITY_THRESHOLD:
-        await update.message.reply_text(answer)
+
+def teach_bot(user_question, kb):
+    print("Bot: I don't know the answer to that yet. Can you teach me? (type the answer)")
+    answer = input("Your answer: ").strip()
+
+    if answer:
+        kb["qa_pairs"].append({"question": user_question, "answer": answer})
+        save_knowledge_base(kb)
+        print("Bot: Thanks! I've learned that.")
     else:
-        TEACH_MODE[user_id] = text
-        await update.message.reply_text(
-            "I do not know that yet.\n"
-            "Please send me the correct answer, and I will learn it."
-        )
+        print("Bot: No answer given, so I won't save anything.")
 
-def main():
-    app = ApplicationBuilder().token(TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    print("Bot is running...")
-    app.run_polling()
+
+def chat():
+    kb = load_knowledge_base()
+    print("Bot: Hi! Ask me anything. Type 'quit' to exit.")
+
+    while True:
+        user_input = input("You: ").strip()
+        if not user_input:
+            continue
+        if user_input.lower() in ("quit", "exit", "bye"):
+            print("Bot: Goodbye!")
+            break
+
+        best_pair, score = find_best_match(user_input, kb)
+
+        if best_pair and score >= SIMILARITY_THRESHOLD:
+            print(f"Bot: {best_pair['answer']}")
+        else:
+            teach_bot(user_input, kb)
+
 
 if __name__ == "__main__":
-    main()
+    chat()
